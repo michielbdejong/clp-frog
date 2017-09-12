@@ -1,0 +1,20 @@
+{
+  "name": "clp-frog",
+  "version": "1.0.0",
+  "description": "Tiny wrapper around Interledger's Ledger Plugin Interface, that exposes CLP",
+  "main": "index.js",
+  "dependencies": {
+    "clp-packet": "github:interledgerjs/clp-packet#mj-testnet-1",
+    "ws": "^3.1.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/michielbdejong/clp-frog.git"
+  },
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/michielbdejong/clp-frog/issues"
+  },
+  "homepage": "https://github.com/michielbdejong/clp-frog#readme"
+}
