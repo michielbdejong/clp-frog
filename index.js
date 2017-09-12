@@ -6,16 +6,16 @@ function MakeProtocolData(obj) {
   let protocolData = [
     {
       protocolName: 'from',
-      contentType: ClpPacket.MIME_APPLICATION_OCTET_STREAM,
+      contentType: ClpPacket.MIME_TEXT_PLAIN_UTF8,
       data: Buffer.from(obj.from, 'ascii')
     },
     {
       protocolName: 'to',
-      contentType: ClpPacket.MIME_APPLICATION_OCTET_STREAM,
+      contentType: ClpPacket.MIME_TEXT_PLAIN_UTF8,
       data: Buffer.from(obj.to, 'ascii')
     }
   ]
-  if (request.ilp) {
+  if (obj.ilp) {
     protocolData.push({
       protocolName: 'ilp',
       contentType: ClpPacket.MIME_APPLICATION_OCTET_STREAM,
@@ -24,11 +24,11 @@ function MakeProtocolData(obj) {
   } else {
     protocolData.push({
       protocolName: 'ccp',
-      contentType: ClpPacket.MIME_APPLICATION_OCTET_STREAM,
+      contentType: ClpPacket.MIME_APPLICATION_JSON,
       data: Buffer.from(JSON.stringify(obj.custom), 'ascii')
     })
   }
-  return protocoldata
+  return protocolData
 }
  
 function Frog (config) {
@@ -97,7 +97,6 @@ Frog.prototype = {
       const obj = ClpPacket.deserialize(buf)
       let protocolDataAsObj = {}
       let protocolDataAsArr
-      console.log('looking for protocolData', obj)
       if ([ClpPacket.TYPE_ACK, ClpPacket.TYPE_RESPONSE, ClpPacket.TYPE_MESSAGE].indexOf(obj.type) !== -1) {
         protocolDataAsArr = obj.data
       } else {
@@ -128,10 +127,10 @@ Frog.prototype = {
 
         case ClpPacket.TYPE_PREPARE:
           this.plugin.sendTransfer({
-            id: obj.data.transferId,
+            id: obj.data.transferId.toString(),
             from: this.plugin.getAccount(),
             to: protocolDataAsObj.to.data,
-            ledger: this.plugin.getInfo().ledger,
+            ledger: this.plugin.getInfo().prefix,
             amount: obj.data.amount.toString(),
             ilp: protocolDataAsObj.ilp.data.toString('base64'),
             noteToSelf: {},
@@ -152,18 +151,26 @@ Frog.prototype = {
         case ClpPacket.TYPE_MESSAGE:
           switch (obj.data[0].protocolName) {
             case 'ilp':
-              this.plugin.sendRequest({
-                id: obj.requestId,
+              const lpiRequest = {
+                id: obj.requestId.toString(),
                 from: this.plugin.getAccount(),
-                to: protocolDataAsObj.to.data,
-                ledger: this.plugin.getInfo().ledger,
+                to: protocolDataAsObj.to.data.toString('ascii'),
+                ledger: this.plugin.getInfo().prefix,
                 ilp: protocolDataAsObj.ilp.data.toString('base64'),
                 custom: {}
-              }).then((response) => {
-                if (IlpPacket.deserializeIlpPacket(protocolDataAsObj.ilp.data).type ===  IlpPacket.TYPE_ILP_ERROR) {
+              }
+              this.plugin.sendRequest(lpiRequest).then((response) => {
+                const responsePacketBuf = Buffer.from(response.ilp, 'base64')
+                const ilpResponse = IlpPacket.deserializeIlpPacket(responsePacketBuf)
+                const responseProtocolData = MakeProtocolData(response)
+                if (ilpResponse.type ===  IlpPacket.TYPE_ILP_ERROR) {
                   this.ws.send(ClpPacket.serialize({
                     type: ClpPacket.TYPE_ERROR,
-                    data: MakeProtocolData(response)
+                    requestId: obj.requestId,
+                    data: {
+                      rejectionReason: err,
+                      protocolData: responseProtocolData
+                    }
                   }))
                 } else {
                   this.ws.send(ClpPacket.serialize({
@@ -176,7 +183,10 @@ Frog.prototype = {
                 this.ws.send(ClpPacket.serialize({
                   type: ClpPacket.TYPE_ERROR,
                   requestId: obj.requestId,
-                  data: MakeProtocolData(response)
+                  data: {
+                    rejectionReason: err,
+                    protocolData: []
+                  }
                 }))
               })
               break
@@ -217,7 +227,6 @@ Frog.prototype = {
                 while (balanceBuf.length < 8) {
                   balanceBuf = Buffer.concat([ Buffer.from([ 0 ]), balanceBuf ])
                 }
-                console.log({ decStr, hexStr, balanceBuf })
                 this.ws.send(ClpPacket.serialize({
                   type: ClpPacket.TYPE_RESPONSE,
                   requestId: obj.requestId,
@@ -246,9 +255,7 @@ Frog.prototype = {
   },
 
   stop() {
-    console.log('closing clp-frog')
     return this.plugin.disconnect().then(() => {
-      console.log('disconnected, stopping frog node')
       return this.node.stop()
     })
   }
