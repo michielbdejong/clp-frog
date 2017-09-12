@@ -51,7 +51,7 @@ function Frog (config) {
 Frog.prototype = {
   registerPluginEventHandlers() {
     this.plugin.on('incoming_prepare', (transfer) => {
-      console.log('incoming prepare!', transfer)
+      // console.log('incoming prepare!', transfer)
       try {
         this.ws.send(ClpPacket.serialize({
           type: ClpPacket.TYPE_PREPARE,
@@ -80,7 +80,7 @@ Frog.prototype = {
       return promise
     })
     this.plugin.on('outgoing_fulfill', (transfer, fulfillment) => {
-      console.log('our prepare was fulfilled on-ledger!', transfer, fulfillment)
+      // console.log('our prepare was fulfilled on-ledger!', transfer, fulfillment)
       try {
         this.ws.send(ClpPacket.serialize({
           type: ClpPacket.TYPE_FULFILL,
@@ -112,7 +112,7 @@ Frog.prototype = {
     })
   },
 
-  _handleIlpMessage(obj) {
+  _handleIlpMessage(obj, protocolDataAsObj) {
     const lpiRequest = {
       id: obj.requestId.toString(),
       from: this.plugin.getAccount(),
@@ -153,7 +153,7 @@ Frog.prototype = {
     })
   },
 
-  _handleInfoMessage(obj) {
+  _handleInfoMessage(obj, protocolDataAsObj) {
     if (obj.data[0].data[0] === 0) {
       this.ws.send(ClpPacket.serialize({
         type: ClpPacket.TYPE_RESPONSE,
@@ -181,7 +181,7 @@ Frog.prototype = {
     }
   },
 
-  _handleBalanceMessage(obj) {
+  _handleBalanceMessage(obj, protocolDataAsObj) {
     this.plugin.getBalance().then(decStr => {
       let hexStr = parseInt(decStr).toString(16)
       if (hexStr.length % 2 === 1) {
@@ -205,16 +205,16 @@ Frog.prototype = {
     })
   },
 
-  _handleMessage(obj) {
+  _handleMessage(obj, protocolDataAsObj) {
     switch (obj.data[0].protocolName) {
       case 'ilp':
-        return this._handleIlpMessage(obj)
+        return this._handleIlpMessage(obj, protocolDataAsObj)
         break
       case 'info':
-        return this._handleInfoMessage(obj)
+        return this._handleInfoMessage(obj, protocolDataAsObj)
         break
       case 'balance':
-        return this._handleBalanceMessage(obj)
+        return this._handleBalanceMessage(obj, protocolDataAsObj)
         break
     }
   },
@@ -223,7 +223,7 @@ Frog.prototype = {
     this.ws.on('message', (buf) => {
       try {
         const obj = ClpPacket.deserialize(buf)
-        console.log('message reached frog over CLP WebSocket!', obj)
+        // console.log('message reached frog over CLP WebSocket!', obj)
         let protocolDataAsObj = {}
         let protocolDataAsArr
         if ([ClpPacket.TYPE_ACK, ClpPacket.TYPE_RESPONSE, ClpPacket.TYPE_MESSAGE].indexOf(obj.type) !== -1) {
@@ -276,10 +276,10 @@ Frog.prototype = {
               expiresAt: obj.data.expiresAt.toISOString(),
               custom: {}
             }
-            console.log('preparing on-ledger', lpiTransfer)
+            // console.log('preparing on-ledger', lpiTransfer)
             try {
               this.plugin.sendTransfer(lpiTransfer).then(result => {
-                console.log('prepared', result)
+                // console.log('prepared', result)
               }, err => {
                 console.error(err)
               })
@@ -313,7 +313,7 @@ Frog.prototype = {
             break
 
           case ClpPacket.TYPE_MESSAGE:
-            this.handleMessage(obj)
+            this._handleMessage(obj, protocolDataAsObj)
             break
           default:
            // ignore
