@@ -10,13 +10,4 @@ The ['balance' protocol](https://github.com/interledger/interledger/wiki/Interle
 
 ![frog](http://kids.nationalgeographic.com/content/dam/kids/photos/articles/Other%20Explore%20Photos/R-Z/Wacky%20Weekend/Frogs/ww-frogs-waxy-monkey-tree.adapt.945.1.jpg "Common Frog")
 
-This will output Alice's balance in nano-USD, e.g. "206157309414":
-```sh
-npm install ilp-plugin-bells
-DEBUG=* PORT=3010 BELLS_ACCOUNT=https://red.ilpdemo.org/ledger/accounts/alice BELLS_PASSWORD=alice PORT=3010 node fiveBellsFrog.js
-sleep 10 # wait for plugin to connect to the ledger
-
-npm install -g clp-cat
-clp-cat -c ws://localhost:8000/clp-frog/clp/v1/alice/alice
->  
-```
+To see a usage example, it's easiest to put your [clp-frog together with a clp-cat](https://github.com/michielbdejong/clp-cat).

@@ -1,114 +1,192 @@
-const WebSocket = require('ws')
-const http = require('http')
+const ClpNode = require('clp-node')
+const ClpPacket = require('clp-packet')
+const IlpPacket = require('ilp-packet')
 
-const FrogPeer = require('./frog-peer')
-
-const letsEncrypt = require('./letsencrypt')
-
+function MakeProtocolData(obj) {
+  let protocolData = [
+    {
+      protocolName: 'from',
+      contentType: ClpPacket.MIME_APPLICATION_OCTET_STREAM,
+      data: Buffer.from(obj.from, 'ascii')
+    },
+    {
+      protocolName: 'to',
+      contentType: ClpPacket.MIME_APPLICATION_OCTET_STREAM,
+      data: Buffer.from(obj.to, 'ascii')
+    }
+  ]
+  if (request.ilp) {
+    protocolData.push({
+      protocolName: 'ilp',
+      contentType: ClpPacket.MIME_APPLICATION_OCTET_STREAM,
+      data: Buffer.from(obj.ilp, 'base64')
+    })
+  } else {
+    protocolData.push({
+      protocolName: 'ccp',
+      contentType: ClpPacket.MIME_APPLICATION_OCTET_STREAM,
+      data: Buffer.from(JSON.stringify(obj.custom), 'ascii')
+    })
+  }
+  return protocoldata
+}
+ 
 function Frog (config) {
-  this.upstreams = []
-  this.serversToClose = []
-  this.plugins = []
-  this.peers = {}
-  this.config = config
-
-  this.plugins.push(config.plugin)
+  this.plugin = config.plugin
+  this.registerPluginEventHandlers()
+  this.requestsReceived = {}
+  this.node = new ClpNode(config.clp, (ws) => {
+    this.ws = ws
+    this.registerWebSocketMessageHandler()
+  })
 }
 
 Frog.prototype = {
-  setClpPeer (ws) {
-    this.peers.default =  new FrogPeer(plugin, ws)
-    return Promise.resolve()
+  registerPluginEventHandlers() {
+    this.plugin.on('incoming_prepare', (transfer) => {
+      this.ws.send(ClpPacket.serialize({
+        type: Clp.TYPE_PREPARE,
+        requestId: uuid(),
+        data: {
+          from: transfer.from,
+          expiresAt: new Date(transfer.expiresAt),
+          amount: parseInt(transfer.amount),
+          executionCondition: Buffer.from(transfer.executionCondition, 'base64'),
+          protocolData: MakeProtocolData(transfer)
+        }
+      }))
+    })
+    this.plugin.registerRequestHandler((request) => { 
+      const promise = new Promise((resolve, reject) => {
+        this.requestsReceived[request.id] = { resolve, reject }
+      })
+      this.ws.send(ClpPacket.serialize({
+        type: Clp.TYPE_MESSAGE,
+        requestId: request.id,
+        data: MakeProtocolData(request)
+      }))
+      return promise
+    })
+    this.plugin.on('outgoing_fulfill', (transfer, fulfillment) => {
+      this.ws.send(ClpPacket.serialize({
+        type: Clp.TYPE_FULFILL,
+        requestId: uuid(),
+        data: {
+          transferId: transfer.id,
+          fulfillment: Buffer.from(fulfillment, 'base64') 
+        }
+      }))
+    })
+    this.plugin.on('outgoing_reject', (transfer, rejectionReason) => {
+      this.ws.send(ClpPacket.serialize({
+        type: Clp.TYPE_REJECT,
+        requestId: uuid(),
+        data: {
+          transferId: transfer.id,
+          rejectionReason
+        }
+      }))
+      this.clp.sendCall(Clp.TYPE_REJECT, {
+        transferId: transfer.id,
+      })
+    })
   },
 
-  connectPlugins () {
-    let promises = []
-    for (let i = 0; i < this.plugins.length; i++) {
-      promises.push(this.plugins[i].connect())
-    }
-    return Promise.all(promises)
-  },
-
-  maybeListen () {
-    return new Promise((resolve, reject) => {
-      if (this.config.clp.tls) { // case 1: use LetsEncrypt => [https, http]
-        letsEncrypt('amundsen.michielbdejong.com').then(resolve, reject)
-      } else if (typeof this.config.clp.listen !== 'number') { // case 2: don't open run a server => []
-        resolve([])
-      } else { // case 3: listen without TLS on a port => [http]
-        const server = http.createServer((req, res) => {
-          res.end('This is a CLP server, please upgrade to WebSockets.')
-        })
-        server.listen(this.config.clp.listen, resolve([ server ]))
+  registerWebSocketMessageHandler() {
+    this.ws.on('message', (buf) => {
+      const obj = ClpPacket.deserialize(buf)
+      let protocolDataAsObj = {}
+      for (let i = 0; i < obj.data.protocolData.length; i++) {
+        protocolDataAsObj[obj.data.protocolData[i].protocolName] = obj.data.protocolData[i]
       }
-    }).then(servers => {
-      // console.log('servers:', servers.length)
-      this.serversToClose = servers
-      if (servers.length) {
-        this.wss = new WebSocket.Server({ server: servers[0] })
-        this.serversToClose.push(this.wss)
-        this.wss.on('connection', (ws, httpReq) => {
-          const parts = httpReq.url.split('/')
-          // console.log('client connected!', parts)
-          //        0: software, 1: clp, 2: spec, 3: name, 4: token
-          // e.g. [ 'ilp-node-3', 'clp', 'v1', 'a7f0e298941b772f5abc028d477938b6bbf56e1a14e3e4fae97015401e8ab372', 'ea16ed65d80fa8c760e9251b235e3d47893e7c35ffe3d9c57bd041200d1c0a50' ]
-          const peerId = parts[3]
-          // const peerToken = parts[4] // TODO: use this to authorize reconnections
-          // console.log('assigned peerId!', peerId)
-          this.addClpPeer('downstream', peerId, ws)
-        })
+      switch (obj.type) {
+        case ClpPacket.TYPE_ACK:
+          this.requestsReceived[obj.requestId].resolve()
+          delete this.requestsSent[obj.requestId]
+          break
+        case ClpPacket.TYPE_RESPONSE:
+          if (Array.isArray(obj.data) && obj.data.length) {
+            this.requestsReceived[obj.requestId].resolve(obj.data[0])
+          } else { // treat it as an ACK, see https://github.com/interledger/rfcs/issues/283
+            this.requestsReceived[obj.requestId].resolve()
+          }
+          delete this.requestsSent[obj.requestId]
+          break
+
+        case ClpPacket.TYPE_ERROR:
+          // according to LPI, an error response should fulfill (not reject) the request handler promise
+          this.requestsReceived[obj.requestId].fulfill(obj.data.rejectionReason)
+          delete this.requestsSent[obj.requestId]
+          break
+
+        case ClpPacket.TYPE_PREPARE:
+          this.plugin.sendTransfer({
+            id: obj.data.transferId,
+            from: this.plugin.getAccount(),
+            to: protocolDataAsObj.to.data,
+            ledger: this.plugin.getInfo().ledger,
+            amount: obj.data.amount.toString(),
+            ilp: protocolDataAsObj.ilp.data.toString('base64'),
+            noteToSelf: {},
+            executionCondition: transfer.executionCondition.toString('base64'),
+            expiresAt: transfer.expiresAt.toISOString(),
+            custom: {}
+          })
+          break
+
+        case ClpPacket.TYPE_FULFILL:
+          this.plugin.fulfillCondition(obj.data.transferId, obj.data.fulfillment.toString('base64'))
+          break
+
+        case ClpPacket.TYPE_REJECT:
+          this.plugin.rejectIncomingTransfer(obj.data.transferId, IlpPacket.deserializeIlpError(obj.data.rejectionReason))
+          break
+
+        case ClpPacket.TYPE_MESSAGE:
+          this.plugin.sendRequest({
+            id: obj.requestId,
+            from: plugin.getAccount(),
+            to: protocolDataAsObj.to.data,
+            ledger: plugin.getInfo().ledger,
+            ilp: protocolDataAsObj.ilp.data.toString('base64'),
+            custom: {}
+          }).then((response) => {
+            if (IlpPacket.deserializeIlpPacket(protocolDataAsObj.ilp.data).type ===  IlpPacket.TYPE_ILP_ERROR) {
+              this.ws.send(ClpPacket.serialize({
+                type: ClpPacket.TYPE_ERROR,
+                data: MakeProtocolData(response)
+              }))
+            } else {
+              this.ws.send(ClpPacket.serialize({
+                type: ClpPacket.TYPE_RESPONSE,
+                requestId: obj.requestId,
+                data: MakeProtocolData(response)
+              }))
+            }
+          }, err => {
+            this.ws.send(ClpPacket.serialize({
+              type: ClpPacket.TYPE_ERROR,
+              requestId: obj.requestId,
+              data: MakeProtocolData(response)
+            }))
+          })
+          break
+        default:
+         // ignore
       }
     })
   },
 
-  connectToUpstreams () {
-    return Promise.all(this.config.clp.upstreams.map(upstreamConfig => {
-      const peerName = upstreamConfig.url.replace(/(?!\w)./g, '')
-      // console.log({ url: upstreamConfig.url, peerName })
-      return new Promise((resolve, reject) => {
-        // console.log('connecting to upstream WebSocket', upstreamConfig.url + '/' + this.config.clp.name + '/' + upstreamConfig.token, this.config.clp, upstreamConfig)
-        const ws = new WebSocket(upstreamConfig.url + '/' + this.config.clp.name + '/' + upstreamConfig.token, {
-          perMessageDeflate: false
-        })
-        ws.on('open', () => {
-          // console.log('creating client peer')
-          this.upstreams.push(ws)
-          this.addClpPeer('upstream', peerName, ws).then(resolve, reject)
-        })
-      })
-    }))
-  },
-
-  start () {
-    return Promise.all([
-      this.maybeListen(), // .then(() => { console.log('maybeListen done', this.config) }),
-      this.connectToUpstreams(), // .then(() => { console.log('connectToUpstreams done', this.config) }),
-      this.connectPlugins() // .then(() => { console.log('connectPlugins done', this.config) })
-    ])
-  },
-
-  stop () {
-    // close ws/wss clients:
-    let promises = this.upstreams.map(ws => {
-      return new Promise(resolve => {
-        ws.on('close', () => {
-          resolve()
-        })
-        ws.close()
-      })
+  start() {
+    return this.plugin.connect().then(() => {
+      return this.node.start()
     })
+  },
 
-    // close http, https, ws/wss servers:
-    promises.push(this.serversToClose.map(server => {
-      return new Promise((resolve) => {
-        server.close(resolve)
-      })
-    }))
-
-    // disconnect plugins:
-    promises.push(this.plugins.map(plugin => plugin.disconnect()))
-    return Promise.all(promises)
+  stop() {
+    return this.plugin.disconnect().then(() => {
+      return this.node.stop()
+    })
   }
 }
-
 module.exports = Frog
