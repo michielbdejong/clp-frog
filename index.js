@@ -1,4 +1,4 @@
-const ClpNode = require('clp-node')
+const ClpNode = require('../clp-node')
 const ClpPacket = require('clp-packet')
 const IlpPacket = require('ilp-packet')
 
@@ -96,8 +96,15 @@ Frog.prototype = {
     this.ws.on('message', (buf) => {
       const obj = ClpPacket.deserialize(buf)
       let protocolDataAsObj = {}
-      for (let i = 0; i < obj.data.protocolData.length; i++) {
-        protocolDataAsObj[obj.data.protocolData[i].protocolName] = obj.data.protocolData[i]
+      let protocolDataAsArr
+      console.log('looking for protocolData', obj)
+      if ([ClpPacket.TYPE_ACK, ClpPacket.TYPE_RESPONSE, ClpPacket.TYPE_MESSAGE].indexOf(obj.type) !== -1) {
+        protocolDataAsArr = obj.data
+      } else {
+        protocolDataAsArr = obj.data.protocolData
+      }
+      for (let i = 0; i < protocolDataAsArr.length; i++) {
+        protocolDataAsObj[protocolDataAsArr[i].protocolName] = protocolDataAsArr[i]
       }
       switch (obj.type) {
         case ClpPacket.TYPE_ACK:
@@ -143,33 +150,85 @@ Frog.prototype = {
           break
 
         case ClpPacket.TYPE_MESSAGE:
-          this.plugin.sendRequest({
-            id: obj.requestId,
-            from: plugin.getAccount(),
-            to: protocolDataAsObj.to.data,
-            ledger: plugin.getInfo().ledger,
-            ilp: protocolDataAsObj.ilp.data.toString('base64'),
-            custom: {}
-          }).then((response) => {
-            if (IlpPacket.deserializeIlpPacket(protocolDataAsObj.ilp.data).type ===  IlpPacket.TYPE_ILP_ERROR) {
-              this.ws.send(ClpPacket.serialize({
-                type: ClpPacket.TYPE_ERROR,
-                data: MakeProtocolData(response)
-              }))
-            } else {
+          switch (obj.data[0].protocolName) {
+            case 'ilp':
+              this.plugin.sendRequest({
+                id: obj.requestId,
+                from: this.plugin.getAccount(),
+                to: protocolDataAsObj.to.data,
+                ledger: this.plugin.getInfo().ledger,
+                ilp: protocolDataAsObj.ilp.data.toString('base64'),
+                custom: {}
+              }).then((response) => {
+                if (IlpPacket.deserializeIlpPacket(protocolDataAsObj.ilp.data).type ===  IlpPacket.TYPE_ILP_ERROR) {
+                  this.ws.send(ClpPacket.serialize({
+                    type: ClpPacket.TYPE_ERROR,
+                    data: MakeProtocolData(response)
+                  }))
+                } else {
+                  this.ws.send(ClpPacket.serialize({
+                    type: ClpPacket.TYPE_RESPONSE,
+                    requestId: obj.requestId,
+                    data: MakeProtocolData(response)
+                  }))
+                }
+              }, err => {
+                this.ws.send(ClpPacket.serialize({
+                  type: ClpPacket.TYPE_ERROR,
+                  requestId: obj.requestId,
+                  data: MakeProtocolData(response)
+                }))
+              })
+              break
+            case 'info':
+              if (obj.data[0].data[0] === 0) {
+                this.ws.send(ClpPacket.serialize({
+                  type: ClpPacket.TYPE_RESPONSE,
+                  requestId: obj.requestId,
+                  data: [
+                    {
+                      protocolName: 'info',
+                      contentType: ClpPacket.MIME_APPLICATION_OCTET_STREAM,
+                      data: Buffer.from(this.plugin.getAccount(), 'ascii')
+                    }
+                  ]
+                }))
+              } else {
+                this.ws.send(ClpPacket.serialize({
+                  type: ClpPacket.TYPE_RESPONSE,
+                  requestId: obj.requestId,
+                  data: [
+                    {
+                      protocolName: 'info',
+                      contentType: ClpPacket.MIME_APPLICATION_JSON,
+                      data: Buffer.from(JSON.stringify(this.plugin.getInfo()), 'ascii')
+                    }
+                  ]
+                }))
+              }
+              break
+            case 'balance':
+              let hexStr = parseInt(this.plugin.getBalance()).toString(16)
+              if (hexStr.length % 2 === 1) {
+                hexStr = '0' + hexStr
+              }
+              let balanceBuf = Buffer.from(hexStr, 'hex')
+              while (balanceBuf.length < 8) {
+                balanceBuf = Buffer.concat([ Buffer.from([ 0 ]), balanceBuf ])
+              }
               this.ws.send(ClpPacket.serialize({
                 type: ClpPacket.TYPE_RESPONSE,
                 requestId: obj.requestId,
-                data: MakeProtocolData(response)
+                data: [
+                  {
+                    protocolName: 'balance',
+                    contentType: ClpPacket.MIME_APPLICATION_OCTET_STREAM,
+                    data: balanceBuf
+                  }
+                ]
               }))
-            }
-          }, err => {
-            this.ws.send(ClpPacket.serialize({
-              type: ClpPacket.TYPE_ERROR,
-              requestId: obj.requestId,
-              data: MakeProtocolData(response)
-            }))
-          })
+              break
+          }
           break
         default:
          // ignore
@@ -184,7 +243,9 @@ Frog.prototype = {
   },
 
   stop() {
+    console.log('closing clp-frog')
     return this.plugin.disconnect().then(() => {
+      console.log('disconnected, stopping frog node')
       return this.node.stop()
     })
   }
