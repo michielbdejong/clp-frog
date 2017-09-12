@@ -188,7 +188,7 @@ Frog.prototype = {
                   data: [
                     {
                       protocolName: 'info',
-                      contentType: ClpPacket.MIME_APPLICATION_OCTET_STREAM,
+                      contentType: ClpPacket.MIME_TEXT_PLAIN_UTF8,
                       data: Buffer.from(this.plugin.getAccount(), 'ascii')
                     }
                   ]
@@ -208,25 +208,28 @@ Frog.prototype = {
               }
               break
             case 'balance':
-              let hexStr = parseInt(this.plugin.getBalance()).toString(16)
-              if (hexStr.length % 2 === 1) {
-                hexStr = '0' + hexStr
-              }
-              let balanceBuf = Buffer.from(hexStr, 'hex')
-              while (balanceBuf.length < 8) {
-                balanceBuf = Buffer.concat([ Buffer.from([ 0 ]), balanceBuf ])
-              }
-              this.ws.send(ClpPacket.serialize({
-                type: ClpPacket.TYPE_RESPONSE,
-                requestId: obj.requestId,
-                data: [
-                  {
-                    protocolName: 'balance',
-                    contentType: ClpPacket.MIME_APPLICATION_OCTET_STREAM,
-                    data: balanceBuf
-                  }
-                ]
-              }))
+              this.plugin.getBalance().then(decStr => {
+                let hexStr = parseInt(decStr).toString(16)
+                if (hexStr.length % 2 === 1) {
+                  hexStr = '0' + hexStr
+                }
+                let balanceBuf = Buffer.from(hexStr, 'hex')
+                while (balanceBuf.length < 8) {
+                  balanceBuf = Buffer.concat([ Buffer.from([ 0 ]), balanceBuf ])
+                }
+                console.log({ decStr, hexStr, balanceBuf })
+                this.ws.send(ClpPacket.serialize({
+                  type: ClpPacket.TYPE_RESPONSE,
+                  requestId: obj.requestId,
+                  data: [
+                    {
+                      protocolName: 'balance',
+                      contentType: ClpPacket.MIME_APPLICATION_OCTET_STREAM,
+                      data: balanceBuf
+                    }
+                  ]
+                }))
+              })
               break
           }
           break
