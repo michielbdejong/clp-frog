@@ -42,10 +42,12 @@ function Frog (config) {
   this.plugin = config.plugin
   this.registerPluginEventHandlers()
   this.requestsReceived = {}
-  this.node = new ClpNode(config.clp, (ws) => {
-    this.ws = ws
-    this.registerWebSocketMessageHandler()
-  })
+  this.node = new ClpNode(config.clp, (whoAmI, baseUrl, urlPath) => {
+    if (this.url) {
+      console.warn(`WARNING: New peer (${ baseUrl + urlPath }) will now kick out earlier peer (${ this.url })`)
+    }
+    this.url = baseUrl + urlPath
+  }, this.handleWebSocketMessage.bind(this))
 }
 
 Frog.prototype = {
@@ -53,7 +55,7 @@ Frog.prototype = {
     this.plugin.on('incoming_prepare', (transfer) => {
       // console.log('incoming prepare!', transfer)
       try {
-        this.ws.send(ClpPacket.serialize({
+        this.node.send(this.url, ClpPacket.serialize({
           type: ClpPacket.TYPE_PREPARE,
           requestId: generateRequestId(),
           data: {
@@ -72,7 +74,7 @@ Frog.prototype = {
       const promise = new Promise((resolve, reject) => {
         this.requestsReceived[request.id] = { resolve, reject }
       })
-      this.ws.send(ClpPacket.serialize({
+      this.node.send(this.url, ClpPacket.serialize({
         type: ClpPacket.TYPE_MESSAGE,
         requestId: request.id,
         data: MakeProtocolData(request)
@@ -82,7 +84,7 @@ Frog.prototype = {
     this.plugin.on('outgoing_fulfill', (transfer, fulfillment) => {
       // console.log('our prepare was fulfilled on-ledger!', transfer, fulfillment)
       try {
-        this.ws.send(ClpPacket.serialize({
+        this.node.send(this.url, ClpPacket.serialize({
           type: ClpPacket.TYPE_FULFILL,
           requestId: generateRequestId(),
           data: {
@@ -97,7 +99,7 @@ Frog.prototype = {
     })
     this.plugin.on('outgoing_reject', (transfer, rejectionReason) => {
       try {
-        this.ws.send(ClpPacket.serialize({
+        this.node.send(this.url, ClpPacket.serialize({
           type: ClpPacket.TYPE_REJECT,
           requestId: generateRequestId(),
           data: {
@@ -126,7 +128,7 @@ Frog.prototype = {
       const ilpResponse = IlpPacket.deserializeIlpPacket(responsePacketBuf)
       const responseProtocolData = MakeProtocolData(response)
       if (ilpResponse.type ===  IlpPacket.TYPE_ILP_ERROR) {
-        this.ws.send(ClpPacket.serialize({
+        this.node.send(this.url, ClpPacket.serialize({
           type: ClpPacket.TYPE_ERROR,
           requestId: obj.requestId,
           data: {
@@ -135,14 +137,14 @@ Frog.prototype = {
           }
         }))
       } else {
-        this.ws.send(ClpPacket.serialize({
+        this.node.send(this.url, ClpPacket.serialize({
           type: ClpPacket.TYPE_RESPONSE,
           requestId: obj.requestId,
           data: MakeProtocolData(response)
         }))
       }
     }, err => {
-      this.ws.send(ClpPacket.serialize({
+      this.node.send(this.url, ClpPacket.serialize({
         type: ClpPacket.TYPE_ERROR,
         requestId: obj.requestId,
         data: {
@@ -155,7 +157,7 @@ Frog.prototype = {
 
   _handleInfoMessage(obj, protocolDataAsObj) {
     if (obj.data[0].data[0] === 0) {
-      this.ws.send(ClpPacket.serialize({
+      this.node.send(this.url, ClpPacket.serialize({
         type: ClpPacket.TYPE_RESPONSE,
         requestId: obj.requestId,
         data: [
@@ -167,7 +169,7 @@ Frog.prototype = {
         ]
       }))
     } else {
-      this.ws.send(ClpPacket.serialize({
+      this.node.send(this.url, ClpPacket.serialize({
         type: ClpPacket.TYPE_RESPONSE,
         requestId: obj.requestId,
         data: [
@@ -191,7 +193,7 @@ Frog.prototype = {
       while (balanceBuf.length < 8) {
         balanceBuf = Buffer.concat([ Buffer.from([ 0 ]), balanceBuf ])
       }
-      this.ws.send(ClpPacket.serialize({
+      this.node.send(this.url, ClpPacket.serialize({
         type: ClpPacket.TYPE_RESPONSE,
         requestId: obj.requestId,
         data: [
@@ -219,109 +221,107 @@ Frog.prototype = {
     }
   },
 
-  registerWebSocketMessageHandler() {
-    this.ws.on('message', (buf) => {
-      try {
-        const obj = ClpPacket.deserialize(buf)
-        // console.log('message reached frog over CLP WebSocket!', obj)
-        let protocolDataAsObj = {}
-        let protocolDataAsArr
-        if ([ClpPacket.TYPE_ACK, ClpPacket.TYPE_RESPONSE, ClpPacket.TYPE_MESSAGE].indexOf(obj.type) !== -1) {
-          protocolDataAsArr = obj.data
-        } else {
-          protocolDataAsArr = obj.data.protocolData
-        }
-        for (let i = 0; i < protocolDataAsArr.length; i++) {
-          protocolDataAsObj[protocolDataAsArr[i].protocolName] = protocolDataAsArr[i]
-        }
-        switch (obj.type) {
-          case ClpPacket.TYPE_ACK:
-            // If it's a response to sendRequest, then resolve it:
-            if (this.requestsReceived[obj.requestId]) {
-              this.requestsReceived[obj.requestId].resolve()
-              delete this.requestsSent[obj.requestId]
-            }
-            break
-          case ClpPacket.TYPE_RESPONSE:
-            // If it's a response to sendRequest, then resolve it:
-            if (this.requestsReceived[obj.requestId]) {
-              if (Array.isArray(obj.data) && obj.data.length) {
-                this.requestsReceived[obj.requestId].resolve(obj.data[0])
-              } else { // treat it as an ACK, see https://github.com/interledger/rfcs/issues/283
-                this.requestsReceived[obj.requestId].resolve()
-              }
-              delete this.requestsSent[obj.requestId]
-            }
-            break
-
-          case ClpPacket.TYPE_ERROR:
-            // If it's a response to sendRequest, then resolve it:
-            if (this.requestsReceived[obj.requestId]) {
-              // according to LPI, an error response should fulfill (not reject) the request handler promise
-              this.requestsReceived[obj.requestId].fulfill(obj.data.rejectionReason)
-              delete this.requestsSent[obj.requestId]
-            }
-            break
-
-          case ClpPacket.TYPE_PREPARE:
-            const lpiTransfer = {
-              id: obj.data.transferId.toString(),
-              from: this.plugin.getAccount(),
-              to: protocolDataAsObj.to.data.toString('ascii'),
-              ledger: this.plugin.getInfo().prefix,
-              amount: obj.data.amount.toString(),
-              ilp: protocolDataAsObj.ilp.data.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''),
-              noteToSelf: {},
-              executionCondition: obj.data.executionCondition.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''),
-              expiresAt: obj.data.expiresAt.toISOString(),
-              custom: {}
-            }
-            // console.log('preparing on-ledger', lpiTransfer)
-            try {
-              this.plugin.sendTransfer(lpiTransfer).then(result => {
-                // console.log('prepared', result)
-              }, err => {
-                console.error(err)
-              })
-            } catch(e) {
-              console.error(e)
-            }
-            break
-
-          case ClpPacket.TYPE_FULFILL:
-            const fulfillmentBase64 = obj.data.fulfillment.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
-            this.plugin.fulfillCondition(obj.data.transferId, fulfillmentBase64).then(() => {
-              this.ws.send(ClpPacket.serialize({
-                type: ClpPacket.TYPE_ACK,
-                requestId: obj.requestId,
-                data: []
-              }))
-            }, err => {
-              this.ws.send(ClpPacket.serialize({
-                type: ClpPacket.TYPE_ERROR,
-                requestId: obj.requestId,
-                data: {
-                  rejectionReason: Buffer.from(err.message, 'ascii'), // TODO: use the right error object here ...
-                  protocolData: []
-                }
-              }))
-            })
-            break
-
-          case ClpPacket.TYPE_REJECT:
-            this.plugin.rejectIncomingTransfer(obj.data.transferId, IlpPacket.deserializeIlpError(obj.data.rejectionReason))
-            break
-
-          case ClpPacket.TYPE_MESSAGE:
-            this._handleMessage(obj, protocolDataAsObj)
-            break
-          default:
-           // ignore
-        }
-      } catch(e) {
-        console.error(e)
+  handleWebSocketMessage(buf) {
+    try {
+      const obj = ClpPacket.deserialize(buf)
+      // console.log('message reached frog over CLP WebSocket!', obj)
+      let protocolDataAsObj = {}
+      let protocolDataAsArr
+      if ([ClpPacket.TYPE_ACK, ClpPacket.TYPE_RESPONSE, ClpPacket.TYPE_MESSAGE].indexOf(obj.type) !== -1) {
+        protocolDataAsArr = obj.data
+      } else {
+        protocolDataAsArr = obj.data.protocolData
       }
-    })
+      for (let i = 0; i < protocolDataAsArr.length; i++) {
+        protocolDataAsObj[protocolDataAsArr[i].protocolName] = protocolDataAsArr[i]
+      }
+      switch (obj.type) {
+        case ClpPacket.TYPE_ACK:
+          // If it's a response to sendRequest, then resolve it:
+          if (this.requestsReceived[obj.requestId]) {
+            this.requestsReceived[obj.requestId].resolve()
+            delete this.requestsSent[obj.requestId]
+          }
+          break
+        case ClpPacket.TYPE_RESPONSE:
+          // If it's a response to sendRequest, then resolve it:
+          if (this.requestsReceived[obj.requestId]) {
+            if (Array.isArray(obj.data) && obj.data.length) {
+              this.requestsReceived[obj.requestId].resolve(obj.data[0])
+            } else { // treat it as an ACK, see https://github.com/interledger/rfcs/issues/283
+              this.requestsReceived[obj.requestId].resolve()
+            }
+            delete this.requestsSent[obj.requestId]
+          }
+          break
+
+        case ClpPacket.TYPE_ERROR:
+          // If it's a response to sendRequest, then resolve it:
+          if (this.requestsReceived[obj.requestId]) {
+            // according to LPI, an error response should fulfill (not reject) the request handler promise
+            this.requestsReceived[obj.requestId].fulfill(obj.data.rejectionReason)
+            delete this.requestsSent[obj.requestId]
+          }
+          break
+
+        case ClpPacket.TYPE_PREPARE:
+          const lpiTransfer = {
+            id: obj.data.transferId.toString(),
+            from: this.plugin.getAccount(),
+            to: protocolDataAsObj.to.data.toString('ascii'),
+            ledger: this.plugin.getInfo().prefix,
+            amount: obj.data.amount.toString(),
+            ilp: protocolDataAsObj.ilp.data.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''),
+            noteToSelf: {},
+            executionCondition: obj.data.executionCondition.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''),
+            expiresAt: obj.data.expiresAt.toISOString(),
+            custom: {}
+          }
+          // console.log('preparing on-ledger', lpiTransfer)
+          try {
+            this.plugin.sendTransfer(lpiTransfer).then(result => {
+              // console.log('prepared', result)
+            }, err => {
+              console.error(err)
+            })
+          } catch(e) {
+            console.error(e)
+          }
+          break
+
+        case ClpPacket.TYPE_FULFILL:
+          const fulfillmentBase64 = obj.data.fulfillment.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+          this.plugin.fulfillCondition(obj.data.transferId, fulfillmentBase64).then(() => {
+            this.node.send(this.url, ClpPacket.serialize({
+              type: ClpPacket.TYPE_ACK,
+              requestId: obj.requestId,
+              data: []
+            }))
+          }, err => {
+            this.node.send(this.url, ClpPacket.serialize({
+              type: ClpPacket.TYPE_ERROR,
+              requestId: obj.requestId,
+              data: {
+                rejectionReason: Buffer.from(err.message, 'ascii'), // TODO: use the right error object here ...
+                protocolData: []
+              }
+            }))
+          })
+          break
+
+        case ClpPacket.TYPE_REJECT:
+          this.plugin.rejectIncomingTransfer(obj.data.transferId, IlpPacket.deserializeIlpError(obj.data.rejectionReason))
+          break
+
+        case ClpPacket.TYPE_MESSAGE:
+          this._handleMessage(obj, protocolDataAsObj)
+          break
+        default:
+         // ignore
+      }
+    } catch(e) {
+      console.error(e)
+    }
   },
 
   start() {
