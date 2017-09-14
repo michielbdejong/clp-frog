@@ -2,6 +2,7 @@ const ClpNode = require('../clp-node')
 const ClpPacket = require('clp-packet')
 const IlpPacket = require('ilp-packet')
 const crypto = require('crypto')
+const CcpPacket = require('./ccp-packet')
 
 function generateRequestId() {
  const buf = crypto.randomBytes(4)
@@ -47,10 +48,24 @@ function Frog (config) {
       console.warn(`WARNING: New peer (${ baseUrl + urlPath }) will now kick out earlier peer (${ this.url })`)
     }
     this.url = baseUrl + urlPath
+    this.announceMyRoute()
   }, this.handleWebSocketMessage.bind(this))
 }
 
 Frog.prototype = {
+  announceMyRoute() {
+    return this.node.send(this.url, CcpProtocol.serialize({
+      type: CcpProtocol.TYPE_ROUTES,
+      data: {
+        new_routes: [
+          {
+             destination_ledger: this.plugin.getInfo().prefix,
+             points: 'AAAAAAAAAAAAAAAAAAAAAP////////////////////8='
+          } 
+        ]
+      }
+    })
+  },
   registerPluginEventHandlers() {
     this.plugin.on('incoming_prepare', (transfer) => {
       // console.log('incoming prepare!', transfer)
