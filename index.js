@@ -1,8 +1,7 @@
-const ClpNode = require('../clp-node')
+const ClpNode = require('clp-node')
 const ClpPacket = require('clp-packet')
 const IlpPacket = require('ilp-packet')
 const crypto = require('crypto')
-const CcpPacket = require('./ccp-packet')
 
 function generateRequestId() {
  const buf = crypto.randomBytes(4)
@@ -11,18 +10,21 @@ function generateRequestId() {
 }
 
 function MakeProtocolData(obj) {
-  let protocolData = [
-    {
+  let protocolData = []
+  if (obj.from) {
+    protocolData.push({
       protocolName: 'from',
       contentType: ClpPacket.MIME_TEXT_PLAIN_UTF8,
       data: Buffer.from(obj.from, 'ascii')
-    },
-    {
+    })
+  }
+  if (obj.to) {
+    protocolData.push({
       protocolName: 'to',
       contentType: ClpPacket.MIME_TEXT_PLAIN_UTF8,
       data: Buffer.from(obj.to, 'ascii')
-    }
-  ]
+    })
+  }
   if (obj.ilp) {
     protocolData.push({
       protocolName: 'ilp',
@@ -38,7 +40,7 @@ function MakeProtocolData(obj) {
   }
   return protocolData
 }
- 
+
 function Frog (config) {
   this.plugin = config.plugin
   this.registerPluginEventHandlers()
@@ -48,23 +50,33 @@ function Frog (config) {
       console.warn(`WARNING: New peer (${ baseUrl + urlPath }) will now kick out earlier peer (${ this.url })`)
     }
     this.url = baseUrl + urlPath
-    this.announceMyRoute()
+    setTimeout(() => {
+      this.announceMyRoute()
+    }, 100)
   }, this.handleWebSocketMessage.bind(this))
 }
 
 Frog.prototype = {
   announceMyRoute() {
-    return this.node.send(this.url, CcpProtocol.serialize({
-      type: CcpProtocol.TYPE_ROUTES,
-      data: {
-        new_routes: [
-          {
-             destination_ledger: this.plugin.getInfo().prefix,
-             points: 'AAAAAAAAAAAAAAAAAAAAAP////////////////////8='
-          } 
-        ]
-      }
-    })
+    const obj = {
+      type: ClpPacket.TYPE_MESSAGE,
+      requestId: 1,
+      data: MakeProtocolData({
+        custom: {
+          type: 0,
+          data: {
+            new_routes: [
+              {
+                 destination_ledger: this.plugin.getInfo().prefix,
+                 points: 'AAAAAAAAAAAAAAAAAAAAAP////////////////////8='
+              } 
+            ]
+          }
+        }
+      })
+    }
+    console.log('announcing!', obj)
+    return this.node.send(this.url, ClpPacket.serialize(obj))
   },
   registerPluginEventHandlers() {
     this.plugin.on('incoming_prepare', (transfer) => {
