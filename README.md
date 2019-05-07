@@ -1,4 +1,7 @@
 # clp-frog
+
+[![Greenkeeper badge](https://badges.greenkeeper.io/michielbdejong/clp-frog.svg)](https://greenkeeper.io/)
+
 Tiny wrapper around Interledger's Ledger Plugin Interface, that exposes the plugin's interface over CLP
 It uses `protocolName: 'from'` and `protocolName: 'to'`, both with `contentType: textPlainUtf8(1)`, to convey the 'from' and 'to' address of LPI's `incoming_prepare` and `incoming_request` events
 in CLP's `PREPARE` and `MESSAGE` calls.
